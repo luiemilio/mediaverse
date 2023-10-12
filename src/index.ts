@@ -1,8 +1,9 @@
 import * as https from 'node:https';
 import * as querystring from 'node:querystring';
 import * as readline from 'node:readline';
-import * as url from 'node:url';
 import * as dotenv from 'dotenv';
+import * as TelegramBot from 'node-telegram-bot-api';
+import { InlineQueryResultPhoto } from 'node-telegram-bot-api';
 
 dotenv.config();
 
@@ -10,13 +11,13 @@ type Media = 'movie' | 'tv';
 
 // type MediaDetails<T> = T extends 'movie' ? MovieDetails : T extends 'tv' ? TVDetails : never;
 type MediaResult<T> = T extends 'movie' ? MovieResult : T extends 'tv' ? TVResult : never;
+
 interface Search<MediaType> {
     page: number;
     results: MediaResult<MediaType>[];
     total_pages: number;
     total_results: number;
 }
-
 
 interface BaseMediaResult {
     adult: boolean;
@@ -40,7 +41,6 @@ interface BaseMediaDetails extends Omit<BaseMediaResult, 'genre_ids'> {
     tagline: string;
     status: string;
 }
-
 
 interface MovieResult extends BaseMediaResult {
     original_title: string;
@@ -147,12 +147,18 @@ interface SpokenLanguageDetails {
     name: string;
 }
 
-const getToken = (): string => {
+const WATCH_PROVIDERS = new Map();
+
+const getTMDBToken = (): string => {
     return process.env.TMDB_TOKEN;
 };
 
+const getTGToken = (): string => {
+    return process.env.TELEGRAM_TOKEN;
+};
+
 const baseUrl = (): string => {
-    return 'https://api.themoviedb.org/3/';
+    return 'https://api.themoviedb.org/3';
 };
 
 const posterBaseUrl = (): string => {
@@ -171,8 +177,7 @@ const tvQuery = async (queryString: string): Promise<Search<'tv'>> => {
     return results;
 };
 
-
-const mediaQuery = async(query: string, type: Media, page = 1): Promise<Search<Media> | void> => {
+const mediaQuery = async (query: string, type: Media, page = 1): Promise<Search<Media> | undefined> => {
     const queryString = querystring.stringify({ query, include_adult: false, language: 'en-US', page });
 
     switch (type) {
@@ -183,7 +188,7 @@ const mediaQuery = async(query: string, type: Media, page = 1): Promise<Search<M
         case 'tv': {
             return tvQuery(queryString);
         }
-            
+
         default: {
             break;
         }
@@ -195,9 +200,23 @@ const getMediaById = async (id: number, type: string): Promise<MovieDetails | TV
     return fetch(url) as unknown as MovieDetails | TVDetails;
 };
 
+const getWatchProvidersByMediaId = async (id: number, type: string): Promise<any> => {
+    const url = `${baseUrl()}/${type}/${id}/watch/providers`;
+    return fetch(url);
+};
+
+const getWatchProviders = async (type: Media): Promise<any> => {
+    if (!WATCH_PROVIDERS.has(type)) {
+        const url = `${baseUrl()}/watch/providers/${type}?language=en-US&watch_region=US'`;
+        WATCH_PROVIDERS.set(type, await fetch(url));
+    };
+
+    return WATCH_PROVIDERS.get(type);
+};
+
 const fetch = (url: string): Promise<unknown> => {
     console.log('fetch url: ', url);
-    const token = getToken();
+    const token = getTMDBToken();
     const options = {
         headers: {
             Authorization: `Bearer ${token}`,
@@ -230,102 +249,126 @@ const fetch = (url: string): Promise<unknown> => {
     });
 };
 
-const getUserInput = (input: readline.Interface, query: string): Promise<string> => {
-    return new Promise((resolve) => {
-        input.question(query, (answer) => {
-            resolve(answer);
-        });
-    });
-};
-
-const handleUserInput = async (query: string, validResponses: string[]): Promise<string | void> => {
-    const input = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout
-    });
-
-    const response = await getUserInput(input, query);
-
-    input.close();
-
-    if (!validResponses.includes(response)) {
-        process.stdout.write('\r\x1b[K');
-        return handleUserInput('Pick an option: ', validResponses);
-    }
-
-    return response;
-};
-
-const getAnswerFromUser = async (
-    results: (MovieResult | TVResult)[],
-    showMoreResults = false
-): Promise<number | void> => {
-    const validChoices: string[] = [];
-    const resultsMap = new Map();
-    let showMoreResultsOptNum;
-
-    results.forEach((result, index) => {
-        const optNum = (index + 1).toString();
-        const title = 'title' in result ? result.title : result.name;
-        const date = 'release_date' in result ? result.release_date : result.first_air_date;
-        const year = new Date(date).getFullYear();
-
-        validChoices.push((index + 1).toString());
-        resultsMap.set(optNum, result);
-
-        process.stdout.write(`${optNum}. ${title} (${year})\n`);
-    });
-
-    if (showMoreResults) {
-        showMoreResultsOptNum = (results.length + 1).toString();
-        validChoices.push(showMoreResultsOptNum);
-        process.stdout.write(`${results.length + 1}. [SHOW MORE RESULTS]\n`);
-    }
-
-    const choice = await handleUserInput('Pick an option: ', validChoices);
-    const result = resultsMap.get(choice);
-
-    if (result) {
-        return result.id;
-    }
-};
-
-const userSearch = async (query: string, type: Media, page: number): Promise<MovieDetails | TVDetails | void> => {
-    const search = await mediaQuery(query, type, page);
-    
-    if (search) {
-        const { results, total_pages } = search;
-        const currentPage = page;
-        const showMoreResults = currentPage < total_pages;
-        const id = await getAnswerFromUser(results, showMoreResults);
-    
-        if (id) {
-            return getMediaById(id, type);
-        } else if (showMoreResults && currentPage < total_pages){
-            return userSearch(query, type, currentPage + 1);
-        }
-    }
-};
-
 const getPosterUrl = (posterPath: string): string => {
     const baseUrl = new URL(posterBaseUrl());
     return baseUrl.href + posterPath;
 };
 
-// (async (): Promise<void> => {
-//     const movie = await userSearch('terminator', 'movie', 1) as MovieDetails;
-//     const tv = await userSearch('pantheon', 'tv', 1) as TVDetails;
 
-//     if (movie) {
-//         const { title, imdb_id, poster_path } = movie;
-//         console.log('title: ', title);
-//         console.log('imdb_id: ', imdb_id);
-//         console.log('poster: ', getPosterUrl(poster_path));
-//     }
+const escapeRegExp = (text: string): string => {
+    return text.replace(/[-[\]{}()*+!?.,\\^$|#\s]/g, '\\$&');
+};
 
-//     if (tv) {
-//         const { name, poster_path } = tv;
-//         console.log('title: ', name);
-//         console.log('poster: ', getPosterUrl(poster_path));
-//     }
-// })();
+const getInlineResultsMap = async (
+    query: string,
+    type: Media
+): Promise<TelegramBot.InlineQueryResultArticle[] | undefined> => {
+    const search = await mediaQuery(query, type);
+    const { results } = search;
+
+    if (!results) {
+        return;
+    }
+
+     const resultsPromises = results
+        .slice(0, 10)
+        .filter((result) => {
+            switch (type) {
+                case 'movie': {
+                    return 'title' in result;
+                }
+
+                case 'tv': {
+                    return 'name' in result;
+                }
+
+                default: {
+                    break;
+                }
+            }
+        })
+        .map(async (result) => {
+            const { poster_path, id } = result;
+            let title;
+            let date;
+            let watch = '';
+
+            switch (type) {
+                case 'movie': {
+                    title = 'title' in result ? result.title : undefined;
+                    date = 'title' in result ? result.release_date : undefined;
+                    break;
+                }
+
+                case 'tv': {
+                    title = 'name' in result ? result.name : undefined;
+                    date = 'first_air_date' in result ? result.first_air_date : undefined;
+                    break;
+                }
+
+                default: {
+                    break;
+                }
+            }
+            const year = date ? new Date(date).getFullYear() : undefined;
+            // const thumbnail_url = poster_path && typeof poster_path === 'string' ? getPosterUrl(poster_path) : undefined;
+            const providers = await getWatchProvidersByMediaId(id, type);
+            const { results } = providers;
+
+            if (providers?.results && providers.results?.US) {
+                const { US } = results;
+
+                if (US?.flatrate) {
+                    watch += 'Streaming on:\n';
+
+                    US.flatrate.forEach((service: any) => {
+                        watch += `${service.provider_name}\n`;
+                    });
+                }
+            }
+            
+
+            const message_text = escapeRegExp(`${title} (${year})\n\n${watch}`);
+
+            const inlineResult = {
+                id,
+                type: 'article',
+                title: `${title} (${year})`,
+                input_message_content: {
+                    parse_mode: 'MarkdownV2',
+                    message_text
+                }
+            };
+
+            console.log(inlineResult);
+            return inlineResult;
+        });
+
+        return Promise.all(resultsPromises) as unknown as Promise<TelegramBot.InlineQueryResultArticle[]>;
+};
+
+const getInlineResults = async (query: string): Promise<TelegramBot.InlineQueryResultArticle[]> => {
+    const movies = await getInlineResultsMap(query, 'movie');
+    const tv = await getInlineResultsMap(query, 'tv');
+    const inlineResults = [...movies, ...tv];
+
+    return inlineResults;
+};
+
+(async (): Promise<void> => {
+    const tgToken = getTGToken();
+    const bot = new TelegramBot(tgToken, { polling: true });
+    bot.clearReplyListeners();
+    bot.clearTextListeners();
+
+    bot.on('inline_query', async (inlineQuery) => {
+        console.log('hey');
+        const { query, id } = inlineQuery;
+        const results = await getInlineResults(query);
+        console.log('results length: ', results.length);
+
+        if (results.length > 0) {
+            bot.answerInlineQuery(id, results, { cache_time: 0 });
+        }
+    });
+})();
